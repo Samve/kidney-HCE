@@ -28,8 +28,8 @@ library(maraca)
 
 
 ```{r include=FALSE}
-R <- function() knitr::include_graphics("images/Rlogo.png", dpi=5000)
-MAR <- function() knitr::include_graphics("images/maraca.png", dpi=5000)
+R <- function() knitr::include_graphics("Rlogo.png", dpi=5000)
+MAR <- function() knitr::include_graphics("maraca.png", dpi=5000)
 ```
 
 
@@ -77,9 +77,9 @@ We will use the following three input synthetic datasets that are structured acc
 
 
 ```{r}
-ADSL <- read_excel("data/ADSL.xlsx")
-ADET <- read_excel("data/ADET.xlsx")
-ADLB <- read_excel("data/ADLB.xlsx")
+ADSL <- read_excel("ADSL.xlsx")
+ADET <- read_excel("ADET.xlsx")
+ADLB <- read_excel("ADLB.xlsx")
 
 ```
 
