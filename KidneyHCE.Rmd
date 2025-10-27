@@ -1,0 +1,464 @@
+---
+title: "Derivation and analysis of kidney HCE"
+author: "Niels Jongs, Samvel B. Gasparyan"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+bibliography: ref.bib
+---
+
+\tableofcontents
+\listoftables
+\listoffigures
+
+
+\newpage
+
+## Introduction
+
+```{r include=FALSE}
+options(digits = 10)
+library(readxl)
+library(ggplot2)
+library(nlme)
+library(multcomp)
+library(dplyr)
+library(hce)
+library(maraca)
+```
+
+
+```{r include=FALSE}
+R <- function() knitr::include_graphics("images/Rlogo.png", dpi=5000)
+MAR <- function() knitr::include_graphics("images/maraca.png", dpi=5000)
+```
+
+
+In this supplementary material we will explain how to derive the analysis dataset for the kidney hierarchical composite endpoint (HCE), how to analyze it using win odds [@gasparyan2021power], and how to visualize it using *maraca* plots [@karpefors2022maraca]. Individual GFR slopes are calculated from the power-of-the-mean (POM) mixed-effects model [@vonesh2019mixed]. All calculations are done using the `r R()` software [@R].
+
+- The win odds and its confidence interval are calculated using the `hce` package [@hce]. 
+
+- The *maraca* plots are implemented in the package `maraca` `r MAR()` [@maraca].
+
+In addition, we will be using the following packages:
+
+- The package `readxl` for reading the data [@readxl].
+
+- The package `nlme` for fitting a power-of-the-mean model for GFR slopes [@pinheiro2000fitting].
+
+- The package `multcomp` to derive the total GFR slope from the power-of-the-mean model [@multcomp].
+
+- The package `dplyr` for data manipulation [@dplyr].
+
+- The package `ggplot2` for customizing the maraca plots [@ggplot].
+
+
+```{r eval=FALSE}
+library(readxl)
+library(ggplot2)
+library(nlme)
+library(multcomp)
+library(dplyr)
+
+library(hce)
+library(maraca)
+```
+
+
+```{r}
+packageVersion("hce")
+packageVersion("maraca")
+```
+
+
+## Input datasets
+
+
+We will use the following three input synthetic datasets that are structured according to clinical data standards for analysis datasets. The datasets are `ADSL` containing patient level data, `ADLB` containing GFR measurements for all patients, and `ADET` containing events of interest (death, chronic dialysis, sustained eGFR < 15, sustained eGFR declines of given threshold) and their study day of occurrence. Only one event per patient per type is kept in the `ADET` dataset. 
+
+
+```{r}
+ADSL <- read_excel("data/ADSL.xlsx")
+ADET <- read_excel("data/ADET.xlsx")
+ADLB <- read_excel("data/ADLB.xlsx")
+
+```
+
+```{r eval=FALSE}
+head(ADSL)
+```
+
+```{r echo=FALSE}
+knitr::kable(head(ADSL), caption = "ADSL dataset structure\\label{adsl}")
+```
+
+
+The dataset `ADSL` contains (see Table \ref{adsl}) the columns `ID` for patient ID, `TRTPN`, the planned treatment group, 1 for the active group, 2, for the control group. `STRATAN` contains randomization stratum for each patient (1-4), where a higher value means a higher risk of kidney progression.
+
+```{r eval=FALSE}
+head(ADET)
+```
+
+```{r echo=FALSE}
+knitr::kable(head(ADET), caption = "ADET dataset structure\\label{adet}")
+```
+
+The dataset `ADET` contains subject IDs, `AVAL` column specifies the study day of the event (days from randomization), `PARAM` specifies the type of the event, `PARAMCD` the coded type of the event, while `PARAMN` specifies the priority of the event, the numbers 1 to 6, where a higher value means a better (less severe) outcome.
+
+```{r eval=FALSE}
+ADET |> select(PARAM, PARAMCD, PARAMN) |> arrange(PARAMN) |> unique()
+```
+
+```{r echo=FALSE}
+ADET |> select(PARAM, PARAMCD, PARAMN) |> arrange(PARAMN) |> unique() |>  knitr::kable(caption = "Kidney HCE\\label{hce}", row.names = FALSE)
+```
+
+We need to derive the category 7 of the hierarchical composite endpoint (measurements), which is for patients not having any of the dichotomous outcomes 1-6 and who contribute to the analysis with their individual GFR slope. For this we will use the dataset `ADLB` of laboratory measurements.
+
+```{r eval=FALSE}
+head(ADLB)
+```
+
+```{r echo=FALSE}
+knitr::kable(head(ADLB), caption = "ADLB dataset structure\\label{adlb}")
+```
+
+In this dataset the column `AVAL` is the GFR measurement of patients done at the visit specified in the column `AVISITN`, while `ADAY` is the analysis day of the visit.
+
+We will restrict the analysis to events and GFR measurements up to given cut-off of 3 years since randomization and we will consider the acute effect happening at the first visit, which is Day 14 (we divide by 360 to convert to years). We will derive also the coefficient for the chronic phase, which is the proportion of the length of the chronic phase (total follow-up minus the acute phase) divided by the total follow-up for annualizing the results. This will be used in deriving the total GFR slope from the two slope power-of-the-mean model.
+
+
+```{r}
+CUTOFF <- 3
+ACUTE <- 14/360
+CHRONIC_coef <-  (CUTOFF - ACUTE)/CUTOFF
+```
+
+The following code annualizes the analysis days (by dividing them by 360) and restricts the GFR measurements and dichotomous outcomes to the cut-off timepoint, and only one event per patient, their most severe event, is selected (the event with the lowest `PARAMN` value). The resulting summary table shows the number of patients with a given most severe event.
+
+```{r}
+ADLB$ADAY <- ADLB$ADAY/360
+ADET$AVAL <- ADET$AVAL/360
+ADLB <- ADLB[ADLB$ADAY <= CUTOFF, ]
+EVNT <- ADET |> filter(AVAL <= CUTOFF) |>  arrange(ID, PARAMN)|> group_by(ID) |> 
+  mutate (n = row_number()) |> ungroup() |> filter(n == 1) |> select(- c("n"))
+
+```
+
+```{r eval=FALSE}
+table(EVNT$PARAM, EVNT$TRTPN)
+```
+
+```{r echo=FALSE}
+knitr::kable(table(EVNT$PARAM, EVNT$TRTPN), caption = "Frequency of outcomes by treatment group\\label{freq}", col.names = c("Active", "Control"))
+```
+
+
+
+## Total GFR slope difference calculation
+
+We will merge the datasets `ADLB` and `ADSL` in order to have `STRATAN` and `EGFRBL` columns present with the GFR measurements in the same dataset. Then we will fit a *linear mixed effect model (LME)* using the function `lme()` in the package `nlme.` 
+
+The model will include only measurements up to the cut-off day, will be adjusted for baseline GFR values, and will include in the model covariates for the stratification, the treatment group (converted to a 0, 1 variable with 1 for the active group and 0 for the control), analysis day `ADAY`, the derived `SPLINE` variable which corresponds to time since the acute phase, treatment by analysis day, and treatment by spline interaction terms, without an intercept term.
+
+```{r}
+ADLB0 <- merge(ADLB, ADSL[, c("ID", "STRATAN", "EGFRBL")], by = "ID", all.x = T)
+ADLB0$SPLINE <- ifelse(ADLB0$ADAY <= ACUTE, 0, ADLB0$ADAY - ACUTE)
+
+ADLB0$TRT <- ifelse(ADLB0$TRTPN == 1, 1, 0) 
+fit <- lme(AVAL ~ EGFRBL + STRATAN + TRT + ADAY + SPLINE + ADAY*TRT + SPLINE*TRT - 1,
+            random = list(ID = pdSymm(form = ~ 1 + ADAY)),
+            weights = varComb(varIdent(form = ~ 1|TRT), 
+                              varPower(form = ~ 1 + ADAY)),
+            na.action = na.omit, 
+            data = ADLB0, 
+            method  = "REML",
+            control = lmeControl(maxIter = 1e8, 
+                                 msMaxIter = 1e8,
+                                 opt = "optim", 
+                                 optimMethod = "L-BFGS-B", 
+                                 msVerbose = T))
+```
+
+Then, the function `glht()` from the package `multcomp` can be used to calculate the total GFR slope from a two-slope model accounting for the chronic phase through the `CHRONIC_coef` coefficient.
+
+```{r}
+k <- ncol(coef(fit)) - 1
+MTP <- glht(fit, 
+            linfct = rbind("Total: A - C" =   c(rep(0, k - 2), 1, CHRONIC_coef)))
+SLP <- confint(summary(MTP))
+Slope <- SLP$confint[1:3]
+```
+
+
+Therefore, the total GFR slope difference between (and its 95% confidence interval) active and control group per year is retained in the variable `Slope` and presented in Table \ref{slope}. GFR slope in the active and control groups is calculated in the variables `Slope0` and `Slope1` respectively (using the same model) and presented in Table \ref{slope0}.
+
+```{r}
+MTP0 <- glht(fit,
+            linfct = rbind("Total: A - C" =   c(rep(0, k - 4), 1, 
+                                                CHRONIC_coef, 1, CHRONIC_coef)))
+SLP0 <- confint(summary(MTP0))
+Slope0 <- SLP0$confint[1:3]
+MTP1 <- glht(fit,
+             linfct = rbind("Total: A - C" =   c(rep(0, k - 4), 1, CHRONIC_coef, 0, 0)))
+SLP1 <- confint(summary(MTP1))
+Slope1 <- SLP1$confint[1:3]
+```
+
+
+```{r echo=FALSE}
+knitr::kable(t(Slope), caption = "Total GFR slope difference between treatment groups\\label{slope}", col.names = c("GFR Slope difference", "Lower 95% CI", "Upper 95% CI"), digits = 4)
+```
+
+
+```{r echo=FALSE}
+Slope0 <- as.data.frame(rbind(Slope1, Slope0))
+row.names(Slope0) <- c("Active", "Control")
+knitr::kable(Slope0, caption = "Total GFR slope by treatment groups\\label{slope0}", 
+             col.names = c("GFR Slope", "Lower 95% CI", "Upper 95% CI"), 
+             row.names = TRUE,
+             digits = 4)
+```
+
+We will use this model for predicting individual GFR slope values for all patients at the cut-off timepoint.
+
+
+## Derivation of individual GFR slopes
+
+For predicting the annualized change from baseline in GFR values for all patients at the end of follow-up, we need to create a dataset containing the necessary (the ones included in the model above) baseline covariates of all patients. 
+
+Analysis day is selected as the length of follow-up (`ADAY`), the `SPLINE` variable for the years since the acute phase will be length of follow-up minus the acute phase. Then we can predicted the GFR values at the end of follow-up using the `predict()` function to obtain predicted GFR values for all patients at the end of follow-up, and subtract the corresponding baseline GFR values for each patient (dividing by the length of follow-up will provide the annualized individual GFR slopes for all patients).
+
+```{r}
+ADLB1 <- ADLB0[ADLB0$ADAY == 0, ]
+ADLB1$ADAY <- CUTOFF
+ADLB1$SPLINE <- CUTOFF - ACUTE
+ADLB1$AVALP <- (predict(fit, newdata = ADLB1) - ADLB1$EGFRBL)/CUTOFF
+Desc <- tapply(ADLB1$AVALP, ADLB1$TRT, function(x) list(mean = mean(x), sd = sd(x)))
+do.call(rbind, Desc)
+
+ADLB1$AVALP <- round(ADLB1$AVALP, 2)
+ADLB1 <- ADLB1[, c("ID", "AVALP")]
+ADLB2 <- merge(ADLB1, EVNT, by = "ID", all.x = T)
+ADLB2$AVAL <- ifelse(is.na(ADLB2$AVAL), ADLB1$AVALP, ADLB2$AVAL)
+ADLB2$PARAMCD <- ifelse(is.na(ADLB2$PARAMCD), "eGFR", ADLB2$PARAMCD)
+ADLB2$PARAM <- ifelse(is.na(ADLB2$PARAM), "eGFR slope", ADLB2$PARAM)
+ADLB2$PARAMN <- ifelse(is.na(ADLB2$PARAMN), 7, ADLB2$PARAMN)
+```
+
+Note that although these individual GFR slope values are calculated for all patients, but they will be used only for those patients who did not get one of the dichotomous events described in Table \ref{hce}. Then, we derive the `PARAM` and `PARAMCD` values for those patients, and the priority is set to 7, `PARAMN=7`. We will obtain the following dataset.
+
+```{r eval=FALSE}
+head(ADLB2)
+```
+
+```{r echo=FALSE}
+knitr::kable(head(ADLB2), caption = "Predicted individual GFR slope values\\label{pslope}")
+```
+
+
+
+## Kidney HCE dataset
+
+Lastly, we derive the dataset for the kidney HCE based on predicted individual GFR values (if the patient did not experience a dichotomous outcome during the follow-up) or the study day of the most severe dichotomous event, if the patient experienced one of the outcomes 1-6 in Table \ref{hce}.
+
+```{r}
+
+HCE <- ADLB2[, c("ID", "AVAL", "PARAM", "PARAMCD", "PARAMN")]
+names(HCE)[names(HCE) == "AVAL"] <- "AVAL0"
+names(HCE)[names(HCE) == "PARAM"] <- "GROUP"
+```
+
+In the code below we derive the column `GROUPN` which is the prioritization of outcomes and is meant to introduce order between categories and within each category. Since within each category 1-6 the maximum value is the length of fixed follow-up (since within these categories the study day of the most severe events is used), then we can multiply the length of the follow-up with the priority number. We do this since in the next step we will be adding the study day of the events to the `GROUPN` values to introduce a ranking within each category. A particular care is needed for the category 7. The values in this category can be negative hence adding to the value of `GROUPN` we may get lower values than the values in the category 6. Hence we need to make sure that the value for `GROUPN` in this category is large enough.
+
+
+```{r}
+M <- floor(abs(max(HCE$AVAL0[HCE$PARAMCD == "eGFR"]))) + 1
+CUTOFF0 <- max(c(M, CUTOFF))
+HCE$GROUPN <- CUTOFF*HCE$PARAMN
+HCE$GROUPN[HCE$PARAMCD == "eGFR"] <- CUTOFF0*HCE$PARAMN[HCE$PARAMCD == "eGFR"]
+HCE$AVAL <- HCE$AVAL0 + HCE$GROUPN
+
+ADHCE <- merge(HCE, ADSL, by = "ID")
+ADHCE$TRTP <- ifelse(ADHCE$TRTPN == 1, "A", "P")
+```
+
+
+```{r eval=FALSE}
+head(ADHCE)
+```
+
+```{r echo=FALSE}
+knitr::kable(head(ADHCE), caption = "Kidney HCE data structure\\label{kidneyHCE}")
+```
+
+
+## Win odds and maraca plots
+
+In this section we calculate the win odds and its confidence interval and plot the kidney HCE using the *maraca* plot [@karpefors2022maraca].
+
+```{r}
+res <- calcWO(x = ADHCE, AVAL = "AVAL", TRTP = "TRTP", ref = "P")
+res0 <- res[, c("WO", "LCL", "UCL", "Pvalue")]
+```
+
+
+```{r eval=FALSE}
+res0 
+```
+
+```{r echo=FALSE}
+knitr::kable(res0, caption = "Win odds and its confidence interval\\label{WO}", digits = 4)
+```
+
+And the maraca plot can be created as follows:
+
+```{r }
+hce_test <- maraca(
+  data = ADHCE,
+  step_outcomes = c("DTHADJ", "DIAL90", "EGFR15", "EGFR57", "EGFR50",  "EGFR40"),
+  last_outcome = "eGFR",
+  fixed_followup_days = CUTOFF,
+  column_names = c(outcome = "PARAMCD", arm = "TRTP", value = "AVAL0"),
+  arm_levels = c(active = "A", control = "P"),
+  compute_win_odds = FALSE
+)
+
+```
+
+```{r eval=FALSE}
+plot(hce_test) + theme_classic() + xlab("") + ylab("") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7), 
+        legend.position = "bottom") 
+
+```
+
+```{r echo=FALSE, fig.cap = "The maraca plot of kidney HCE\\label{maraca}"}
+plot_maraca(hce_test) + theme_classic() + xlab("") + ylab("") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 4), 
+        legend.position = "bottom") 
+
+```
+
+
+
+## Acknowledgment
+
+*The synthetic datasets were created and kindly provided by the Analytics Data Preparation Team (ADAPT), Data Office, Data Science and AI, AstraZeneca.*
+
+```{r ref.label=knitr::all_labels(), echo=FALSE, eval=FALSE}
+```
+
+\newpage
+
+
+## Appendix
+
+```{r eval=FALSE, include=TRUE}
+library(readxl)
+library(ggplot2)
+library(nlme)
+library(multcomp)
+library(hce)
+library(maraca)
+library(dplyr)
+
+ADSL <- read_excel("data/ADSL.xlsx")
+ADET <- read_excel("data/ADET.xlsx")
+ADLB <- read_excel("data/ADLB.xlsx")
+CUTOFF <- 3
+ACUTE <- 14/360
+CHRONIC_coef <-  (CUTOFF - ACUTE)/CUTOFF
+
+ADLB$ADAY <- ADLB$ADAY/360
+ADET$AVAL <- ADET$AVAL/360
+ADLB <- ADLB[ADLB$ADAY <= CUTOFF, ]
+EVNT <- ADET |> filter(AVAL <= CUTOFF) |>  arrange(ID, PARAMN)|> group_by(ID) |>
+  mutate (n = row_number()) |> ungroup() |> filter(n == 1) |> select(- c("n"))
+
+table(EVNT$PARAM, EVNT$TRTPN)
+ADLB0 <- merge(ADLB, ADSL[, c("ID", "STRATAN", "EGFRBL")], by = "ID", all.x = T)
+ADLB0$SPLINE <- ifelse(ADLB0$ADAY <= ACUTE, 0, ADLB0$ADAY - ACUTE)
+ADLB0$TRT <- ifelse(ADLB0$TRTP == 1, 1, 0)
+
+fit <- lme(AVAL ~ EGFRBL + STRATAN + TRT + ADAY + SPLINE + ADAY*TRT + SPLINE*TRT - 1,
+           random = list(ID = pdSymm(form = ~ 1 + ADAY)),
+           weights = varComb(varIdent(form = ~ 1|TRT),
+                             varPower(form = ~ 1 + ADAY)),
+           na.action = na.omit,
+           data = ADLB0,
+           method  = "REML",
+           control = lmeControl(maxIter = 1e8,
+                                msMaxIter = 1e8,
+                                opt = "optim",
+                                optimMethod = "L-BFGS-B",
+                                msVerbose = T))
+k <- ncol(coef(fit)) - 1
+MTP <- glht(fit,
+            linfct = rbind("Total: A - C" =   c(rep(0, k - 2), 1, CHRONIC_coef)))
+SLP <- confint(summary(MTP))
+Slope <- SLP$confint[1:3]
+Slope
+
+MTP0 <- glht(fit,
+            linfct = rbind("Total: A - C" =   c(rep(0, k - 4), 1, 
+                                                CHRONIC_coef, 1, CHRONIC_coef)))
+SLP0 <- confint(summary(MTP0))
+Slope0 <- SLP0$confint[1:3]
+Slope0
+MTP1 <- glht(fit,
+             linfct = rbind("Total: A - C" =   c(rep(0, k - 4), 1, CHRONIC_coef, 0, 0)))
+SLP1 <- confint(summary(MTP1))
+Slope1 <- SLP1$confint[1:3]
+Slope1
+
+ADLB1 <- ADLB0[ADLB0$ADAY == 0, ]
+ADLB1$ADAY <- CUTOFF
+ADLB1$SPLINE <- CUTOFF - ACUTE
+ADLB1$AVALP <- (predict(fit, newdata = ADLB1) - ADLB1$EGFRBL)/CUTOFF
+Desc <- tapply(ADLB1$AVALP, ADLB1$TRT,
+               function(x) list(mean = mean(x), sd = sd(x)))
+do.call(rbind, Desc)
+
+ADLB1$AVALP <- round(ADLB1$AVALP, 2)
+ADLB1 <- ADLB1[, c("ID", "AVALP")]
+ADLB2 <- merge(ADLB1, EVNT, by = "ID", all.x = T)
+ADLB2$AVAL <- ifelse(is.na(ADLB2$AVAL), ADLB1$AVALP, ADLB2$AVAL)
+ADLB2$PARAMCD <- ifelse(is.na(ADLB2$PARAMCD), "eGFR", ADLB2$PARAMCD)
+ADLB2$PARAM <- ifelse(is.na(ADLB2$PARAM), "eGFR slope", ADLB2$PARAM)
+ADLB2$PARAMN <- ifelse(is.na(ADLB2$PARAMN), 7, ADLB2$PARAMN)
+
+HCE <- ADLB2[, c("ID", "AVAL", "PARAM", "PARAMCD", "PARAMN")]
+names(HCE)[names(HCE) == "AVAL"] <- "AVAL0"
+names(HCE)[names(HCE) == "PARAM"] <- "GROUP"
+M <- floor(abs(max(HCE$AVAL0[HCE$PARAMCD == "eGFR"]))) + 1
+CUTOFF0 <- max(c(M, CUTOFF))
+
+HCE$GROUPN <- CUTOFF*HCE$PARAMN
+HCE$GROUPN[HCE$PARAMCD == "eGFR"] <- CUTOFF0*HCE$PARAMN[HCE$PARAMCD == "eGFR"]
+HCE$AVAL <- HCE$AVAL0 + HCE$GROUPN
+ADHCE <- merge(HCE, ADSL, by = "ID")
+ADHCE$TRTP <- ifelse(ADHCE$TRTPN == 1, "A", "P")
+head(ADHCE)
+
+res <- calcWO(x = ADHCE, AVAL = "AVAL", TRTP = "TRTP", ref = "P")
+res0 <- res[, c("WO", "LCL", "UCL", "Pvalue")]
+res0
+
+hce_test <- maraca(data = ADHCE,
+                   tte_outcomes = c("DTHADJ", "DIAL90", "EGFR15", 
+                                    "EGFR57", "EGFR50",  "EGFR40"),
+                   continuous_outcome = "eGFR",
+                   fixed_followup_days = CUTOFF,
+                   column_names = c(outcome = "PARAMCD", arm = "TRTP", value = "AVAL0"),
+                   arm_levels = c(active = "A", control = "P"),
+                   compute_win_odds = FALSE)
+
+plot(hce_test) + theme_classic() + xlab("") + ylab("") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7), 
+        legend.position = "bottom")
+```
+
+
+\newpage
+
+## References
